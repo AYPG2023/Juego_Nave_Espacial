@@ -1,59 +1,11 @@
-; =========================================================
-; SPACE RAID - Videojuego 8086 para DOS / VGA Mode 13h
-; =========================================================
-; Proyecto:
-;   Juego de accion inspirado en River Raid implementado en
-;   ensamblador 8086 para TASM/TLINK y ejecutado en DOSBox.
-;
-; Objetivo de este archivo:
-;   Mantener intacta la logica original del juego mientras se
-;   documenta en detalle la estructura, el flujo y el acceso
-;   directo al hardware de video, teclado, temporizacion y
-;   sonido.
-;
-; Arquitectura general:
-;   1. Inicializa el segmento de datos y cambia a VGA modo 13h.
-;   2. Muestra un menu textual usando servicios BIOS.
-;   3. Entra en un game loop con:
-;      - lectura de entrada,
-;      - actualizacion del estado,
-;      - deteccion de colisiones,
-;      - renderizado completo,
-;      - sincronizacion con retrazo vertical VGA.
-;   4. Sale restaurando el modo texto y devolviendo control a DOS.
-;
-; Modelo de memoria:
-;   .model small usa un segmento de codigo y uno de datos.
-;   .stack reserva pila para llamadas PROC/RET e interrupciones.
-;   .data guarda estado, sprites y mensajes.
-;   .code contiene el punto de entrada y todos los procedimientos.
-; =========================================================
-
 .model small
 .stack 100h
-
-; =========================================================
-; CONSTANTES DEL SISTEMA Y DE VIDEO
-; =========================================================
-; SCREEN_W / SCREEN_H:
-;   Resolucion del modo VGA 13h: 320x200 pixeles con 256 colores.
-; VIDEO_SEG:
-;   Segmento fisico A000h, donde VGA expone el framebuffer lineal.
-; MODE_13H / MODE_TEXT:
-;   Valores usados por INT 10h para cambiar entre modo grafico y
-;   modo texto estandar.
 
 SCREEN_W        equ 320
 SCREEN_H        equ 200
 VIDEO_SEG       equ 0A000h
 MODE_13H        equ 0013h
 MODE_TEXT       equ 0003h
-
-; =========================================================
-; CONSTANTES DE JUGABILIDAD Y DIMENSIONES
-; =========================================================
-; Las dimensiones se usan tanto para dibujar sprites como para las
-; comparaciones AABB de colisiones.
 
 SHIP_W          equ 20
 SHIP_H          equ 20
@@ -62,18 +14,11 @@ AST_H           equ 10
 MAX_AST         equ 5
 MAX_BULLETS     equ 8
 
-; Limites del area jugable de la nave.
-; Se deja margen para evitar salir del framebuffer visible.
 SHIP_MIN_X      equ 4
 SHIP_MAX_X      equ 296
 SHIP_MIN_Y      equ 20
 SHIP_MAX_Y      equ 176
 SHIP_STEP       equ 6
-
-; =========================================================
-; PALETA LOGICA
-; =========================================================
-; Indices de color usados al escribir en memoria VGA.
 
 COLOR_BLACK     equ 0
 COLOR_WHITE     equ 15
@@ -84,72 +29,40 @@ COLOR_CYAN      equ 11
 COLOR_GRAY      equ 8
 
 .data
+exit_requested  db 0
+game_over       db 0
 
-; =========================================================
-; ESTADO GLOBAL DEL JUEGO
-; =========================================================
+ship_x          dw 150
+ship_y          dw 166
 
-exit_requested  db 0      ; Flag de salida solicitado por ESC.
-game_over       db 0      ; Flag que congela la simulacion tras perder.
+score           dw 0
+fuel            dw 100
+fuel_tick       db 0
+lives           db 3
 
-ship_x          dw 150    ; Posicion horizontal actual de la nave.
-ship_y          dw 166    ; Posicion vertical actual de la nave.
-
-score           dw 0      ; Puntuacion acumulada por impactos.
-fuel            dw 100    ; Energia restante. Escala logica 0..100.
-fuel_tick       db 0      ; Divisor para consumo gradual de fuel.
-lives           db 3      ; Cantidad de vidas / UMG disponibles.
-
-last_tick       dw 0      ; Tick BIOS leido con INT 1Ah para animaciones.
-rng_seed        dw 1234h  ; Semilla del generador pseudoaleatorio.
-frame_counter   db 0      ; Contador para reaparicion de energia.
-ast_speed_tick  db 0      ; Regulador de velocidad de asteroides.
-invuln_timer    db 0      ; Cuadros de invulnerabilidad tras perder vida.
-
-; =========================================================
-; POOL DE BALAS
-; =========================================================
-; bullet_active define slots libres/ocupados.
-; bullet_x / bullet_y almacenan coordenadas paralelas para reutilizar
-; memoria sin asignaciones dinamicas.
+last_tick       dw 0
+rng_seed        dw 1234h
+frame_counter   db 0
+ast_speed_tick  db 0
+invuln_timer    db 0
 
 bullet_active   db MAX_BULLETS dup(0)
 bullet_x        dw MAX_BULLETS dup(0)
 bullet_y        dw MAX_BULLETS dup(0)
-
-; =========================================================
-; SISTEMA DE ASTEROIDES
-; =========================================================
-; Cada asteroide usa indices paralelos:
-;   ast_x / ast_y  -> posicion
-;   ast_dir        -> deriva lateral (1 = derecha, 255 = izquierda)
 
 ast_active      db MAX_AST dup(1)
 ast_x           dw 20,90,155,220,275
 ast_y           dw 0,35,75,115,150
 ast_dir         db 1,255,1,255,1
 
-; =========================================================
-; ITEM DE ENERGIA
-; =========================================================
+energy_active   db 1
+energy_x        dw 145
+energy_y        dw 40
 
-energy_active   db 1      ; 1 = visible y coleccionable.
-energy_x        dw 145    ; Coordenada horizontal del pack.
-energy_y        dw 40     ; Coordenada vertical del pack.
-
-; =========================================================
-; EFECTO DE EXPLOSION
-; =========================================================
-
-explosion_active db 0     ; 1 mientras el efecto debe renderizarse.
-explosion_x      dw 0     ; Origen X de la explosion.
-explosion_y      dw 0     ; Origen Y de la explosion.
-explosion_timer  db 0     ; Duracion restante en cuadros.
-
-; =========================================================
-; MENSAJES DE INTERFAZ
-; =========================================================
-; Cadenas ASCIIZ usadas por las rutinas de impresion BIOS.
+explosion_active db 0
+explosion_x      dw 0
+explosion_y      dw 0
+explosion_timer  db 0
 
 msg_menu1       db 'ENTER para iniciar',0
 msg_menu2       db 'Flechas: mover   ESPACIO: disparar   ESC: salir',0
@@ -161,12 +74,6 @@ msg_fuel        db 'Energia',0
 msg_gameover    db 'GAME OVER',0
 msg_restart     db 'ESC para salir',0
 msg_lives       db 'UMG',0
-
-; =========================================================
-; RECURSOS GRAFICOS
-; =========================================================
-; Los sprites se codifican como mapas de color indexado.
-; Un valor 0 se interpreta como pixel transparente.
 
 ship_sprite label byte
     db 0,0,0,0,0,0,0,0,0,15,15,0,0,0,0,0,0,0,0,0
@@ -214,23 +121,10 @@ energy_sprite label byte
     db 10,0,0,0,0,0,0,0,0,10
     db 10,10,10,10,10,10,10,10,10,10
 
-; Campo estelar estatico. El eje Y se anima con last_tick para generar
-; desplazamiento vertical barato sin modificar el arreglo original.
 star_x          dw 12,31,55,80,112,146,175,205,238,272,305,25,68,121,164,217,260,310,44,98,190,244,288,155
 star_y          dw 5,18,31,44,58,72,85,96,109,124,137,151,165,179,193,14,27,39,52,66,81,113,145,174
 
 .code
-
-; =========================================================
-; PUNTO DE ENTRADA
-; =========================================================
-; start:
-;   - Inicializa DS con @data.
-;   - Limpia la direccion de cadenas con CLD para LODSB/STOSB.
-;   - Activa modo grafico 13h via INT 10h.
-;   - Muestra menu inicial.
-;   - Si el usuario no cancela, inicializa temporizacion y semilla.
-;   - Entra en el loop principal.
 
 start:
     mov ax,@data
@@ -265,39 +159,19 @@ quit_game:
     mov ax,4C00h
     int 21h
 
-; =========================================================
-; VIDEO Y TEMPORIZACION
-; =========================================================
-
 set_video proc near
-    ; Cambia a VGA modo 13h.
-    ; INT 10h / AH implcito en AX=0013h:
-    ;   Entrada : AX = 0013h
-    ;   Salida  : adaptador en 320x200x256
-    ;   Efecto  : framebuffer lineal accesible en A000h
     mov ax,MODE_13H
     int 10h
     ret
 set_video endp
 
 set_text proc near
-    ; Restaura modo texto 80x25 para retornar limpiamente a DOS.
-    ; INT 10h con AX=0003h.
     mov ax,MODE_TEXT
     int 10h
     ret
 set_text endp
 
 show_menu proc near
-    ; -----------------------------------------------------
-    ; show_menu
-    ; Dibuja la pantalla inicial usando texto BIOS encima
-    ; del modo grafico 13h y espera ENTER o ESC.
-    ;
-    ; Interrupciones usadas:
-    ;   INT 10h -> posicion de cursor / impresion color.
-    ;   INT 16h -> lectura bloqueante de teclado.
-    ; -----------------------------------------------------
 sm_redraw:
     call clear_screen
 
@@ -343,12 +217,6 @@ sm_enter:
 show_menu endp
 
 read_tick proc near
-    ; Lee el contador de ticks del BIOS.
-    ; INT 1Ah / AH=00h:
-    ;   Salida:
-    ;     CX:DX = numero de ticks desde medianoche
-    ;   Uso:
-    ;     DX se reutiliza para animacion del fondo y semilla RNG.
     push ax
     push cx
     mov ah,00h
@@ -359,18 +227,8 @@ read_tick proc near
 read_tick endp
 
 wait_frame proc near
-    ; -----------------------------------------------------
-    ; wait_frame
-    ; Sincroniza el frame con el retrazo vertical leyendo
-    ; el registro de estado VGA en el puerto 03DAh.
-    ;
-    ; Hardware:
-    ;   bit 3 de 03DAh = 1 durante VBlank
-    ;
-    ; Ventaja:
-    ;   evita tearing y da mucha mas fluidez que depender
-    ;   solo del tick BIOS de 18.2 Hz.
-    ; -----------------------------------------------------
+    ; Sincroniza con el refresco vertical de VGA.
+    ; Es mucho mas fluido que esperar el tick del BIOS (18.2 FPS).
     push ax
     push dx
     mov dx,03DAh
@@ -387,25 +245,9 @@ wf_wait_start:
     ret
 wait_frame endp
 
-; =========================================================
-; ENTRADA DEL JUGADOR
-; =========================================================
-
 handle_input proc near
-    ; -----------------------------------------------------
-    ; handle_input
-    ; Sondea hasta 16 eventos de teclado por cuadro para no
-    ; perder disparos mientras el jugador mantiene movimiento.
-    ;
-    ; INT 16h:
-    ;   AH=01h -> verifica si hay tecla pendiente
-    ;   AH=00h -> consume una tecla
-    ;
-    ; Teclas:
-    ;   ESC          -> solicitar salida
-    ;   SPACE        -> disparar
-    ;   Flechas BIOS -> mover nave con limites
-    ; -----------------------------------------------------
+    ; Lee varias teclas por cuadro para que el disparo no se pierda
+    ; cuando el jugador tambien esta moviendo la nave.
     push cx
     mov cx,16
 hi_poll:
@@ -498,18 +340,7 @@ hi_finish:
     ret
 handle_input endp
 
-; =========================================================
-; ACTUALIZACION DEL JUEGO
-; =========================================================
-
 update_game proc near
-    ; Coordina todos los subsistemas que cambian entre cuadros.
-    ; Orden:
-    ;   1. Balas
-    ;   2. Invulnerabilidad
-    ;   3. Explosion
-    ;   4. Asteroides y energia segun dificultad
-    ;   5. Consumo de fuel
     call update_bullets
     call update_invulnerability
     call update_explosion
@@ -532,7 +363,6 @@ ug_only_fuel:
 update_game endp
 
 update_explosion proc near
-    ; Reduce la vida del efecto visual y lo apaga al expirar.
     cmp explosion_active,1
     jne uex_done
     cmp explosion_timer,0
@@ -546,7 +376,6 @@ uex_done:
 update_explosion endp
 
 update_invulnerability proc near
-    ; Ventana de gracia despues de perder una vida.
     cmp invuln_timer,0
     je ui_done
     dec invuln_timer
@@ -555,8 +384,6 @@ ui_done:
 update_invulnerability endp
 
 consume_fuel proc near
-    ; Reduce energia cada 25 iteraciones logicas.
-    ; Si fuel llega a 0, delega en lose_life.
     inc fuel_tick
     cmp fuel_tick,25
     jb cf_done
@@ -571,24 +398,7 @@ cf_done:
     ret
 consume_fuel endp
 
-; =========================================================
-; SISTEMA DE DISPAROS
-; =========================================================
-
 fire_bullet proc near
-    ; -----------------------------------------------------
-    ; fire_bullet
-    ; Busca un slot libre en el pool de balas y lo activa.
-    ;
-    ; Entradas implicitas:
-    ;   ship_x, ship_y
-    ;
-    ; Salida:
-    ;   slot activado con posicion inicial delante de la nave
-    ;
-    ; Detalle:
-    ;   Se evita asignacion dinamica; el pool se recicla.
-    ; -----------------------------------------------------
     push ax
     push bx
     push cx
@@ -624,8 +434,6 @@ fb_done:
 fire_bullet endp
 
 clear_bullets proc near
-    ; Desactiva todos los slots del pool.
-    ; Se usa al perder una vida para reiniciar el espacio de juego.
     push cx
     push si
     mov cx,MAX_BULLETS
@@ -640,8 +448,6 @@ cb_loop:
 clear_bullets endp
 
 update_bullets proc near
-    ; Avanza balas hacia arriba y libera slots al salir de pantalla.
-    ; La comprobacion previa al SUB evita underflow de coordenadas.
     push ax
     push bx
     push cx
@@ -655,6 +461,9 @@ ub_loop:
     mov bx,si
     shl bx,1
     mov ax,bullet_y[bx]
+    ; Si la bala esta cerca del borde superior, liberarla antes de restar.
+    ; Esto evita underflow (por ejemplo 5 - 7 = 65534) y que el slot
+    ; quede ocupado para siempre, bloqueando nuevos disparos.
     cmp ax,8
     jb ub_disable
     sub ax,7
@@ -675,13 +484,7 @@ ub_next:
     ret
 update_bullets endp
 
-; =========================================================
-; SISTEMA DE ASTEROIDES Y ENERGIA
-; =========================================================
-
 update_asteroids proc near
-    ; Mueve asteroides hacia abajo y aplica deriva lateral simple.
-    ; Cuando un asteroide sale del borde inferior, se recicla.
     push ax
     push bx
     push cx
@@ -735,9 +538,6 @@ ua_next:
 update_asteroids endp
 
 update_energy proc near
-    ; Si el pack existe, cae verticalmente.
-    ; Si no existe, reaparece tras cierto numero de cuadros
-    ; en una X pseudoaleatoria dentro del area visible.
     cmp energy_active,1
     jne ue_maybe_spawn
     mov ax,energy_y
@@ -763,15 +563,7 @@ ue_done:
 update_energy endp
 
 reset_asteroid proc near
-    ; -----------------------------------------------------
-    ; reset_asteroid
-    ; Reposiciona un asteroide en la parte superior con
-    ; coordenada X aleatoria y direccion lateral aleatoria.
-    ;
-    ; Entrada:
-    ;   SI = indice logico
-    ;   BX = indice*2 para arreglos word
-    ; -----------------------------------------------------
+    ; Entrada: SI = indice, BX = indice*2
     push ax
     call random_x
     mov ast_x[bx],ax
@@ -789,9 +581,6 @@ ra_done:
 reset_asteroid endp
 
 random_x proc near
-    ; Generador congruencial lineal:
-    ;   seed = seed * 25173 + 13849
-    ; El residuo modulo 300 se desplaza a [5,304] para dejar margen.
     push bx
     push dx
     mov ax,rng_seed
@@ -810,18 +599,12 @@ random_x proc near
 random_x endp
 
 random_bit proc near
-    ; Devuelve en AL el bit menos significativo de la semilla.
     mov ax,rng_seed
     and al,1
     ret
 random_bit endp
 
-; =========================================================
-; DETECCION DE COLISIONES
-; =========================================================
-
 check_collisions proc near
-    ; Coordina los tres tipos de colision del juego.
     call bullet_asteroid_collisions
     call ship_asteroid_collisions
     call ship_energy_collision
@@ -829,18 +612,6 @@ check_collisions proc near
 check_collisions endp
 
 bullet_asteroid_collisions proc near
-    ; -----------------------------------------------------
-    ; bullet_asteroid_collisions
-    ; Recorre el pool de balas y el conjunto de asteroides
-    ; aplicando una prueba AABB punto-rectangulo.
-    ;
-    ; Efectos al impactar:
-    ;   - desactiva la bala
-    ;   - incrementa score
-    ;   - activa explosion
-    ;   - reproduce sonido
-    ;   - recicla el asteroide
-    ; -----------------------------------------------------
     push ax
     push bx
     push cx
@@ -868,6 +639,7 @@ bac_ast_loop:
 
     mov bx,di
     shl bx,1
+    ; X dentro de asteroide
     cmp ax,ast_x[bx]
     jb bac_ast_next
     mov bx,di
@@ -881,6 +653,7 @@ bac_ast_loop:
     pop bx
     ja bac_ast_next
 
+    ; Y dentro de asteroide
     mov bx,si
     shl bx,1
     mov ax,bullet_y[bx]
@@ -933,8 +706,6 @@ bac_finish:
 bullet_asteroid_collisions endp
 
 ship_asteroid_collisions proc near
-    ; Colision AABB entre la nave y cada asteroide.
-    ; Si hay invulnerabilidad activa, la comprobacion se omite.
     cmp invuln_timer,0
     je sac_can_check
     ret
@@ -989,8 +760,6 @@ sac_done:
 ship_asteroid_collisions endp
 
 ship_energy_collision proc near
-    ; Colision AABB entre nave y paquete de energia.
-    ; Al recogerlo, fuel vuelve a 100 y el objeto desaparece.
     cmp energy_active,1
     jne sec_done
     push ax
@@ -1028,17 +797,6 @@ sec_done:
 ship_energy_collision endp
 
 lose_life proc near
-    ; -----------------------------------------------------
-    ; lose_life
-    ; Gestion centralizada de dano / game over.
-    ;
-    ; Flujo:
-    ;   - decrementa vidas si quedan
-    ;   - reproduce sonido
-    ;   - si llega a 0, activa game_over
-    ;   - si quedan vidas, reinicia fuel, posicion, tiempo de
-    ;     invulnerabilidad y balas activas
-    ; -----------------------------------------------------
     cmp lives,0
     je ll_over
     dec lives
@@ -1057,14 +815,7 @@ ll_reset:
     ret
 lose_life endp
 
-; =========================================================
-; RENDERIZADO
-; =========================================================
-
 render_frame proc near
-    ; Orden de pintura:
-    ;   fondo -> proyectiles -> enemigos -> FX -> item -> nave -> HUD
-    ; Si el juego termino, superpone el mensaje GAME OVER.
     call clear_screen
     call draw_starfield
     call draw_bullets
@@ -1081,8 +832,6 @@ rf_done:
 render_frame endp
 
 clear_screen proc near
-    ; Limpia el framebuffer escribiendo 64000 bytes en A000:0000.
-    ; 320 * 200 = 64000 pixeles / bytes en modo 13h.
     push ax
     push cx
     push di
@@ -1101,8 +850,6 @@ clear_screen proc near
 clear_screen endp
 
 draw_starfield proc near
-    ; Fondo animado barato:
-    ; la X es fija y la Y se desplaza usando last_tick.
     push ax
     push bx
     push cx
@@ -1130,7 +877,6 @@ ds_loop:
 draw_starfield endp
 
 draw_ship proc near
-    ; Renderiza la nave usando sprite 20x20.
     push bx
     push dx
     push si
@@ -1145,7 +891,6 @@ draw_ship proc near
 draw_ship endp
 
 draw_asteroids proc near
-    ; Recorre y dibuja los cinco asteroides.
     push bx
     push cx
     push dx
@@ -1175,7 +920,6 @@ da_loop:
 draw_asteroids endp
 
 activate_explosion proc near
-    ; Copia la posicion del asteroide destruido y arma un FX temporal.
     ; Entrada: SI = indice de asteroide, BX = indice*2
     push ax
     mov ax,ast_x[bx]
@@ -1189,7 +933,6 @@ activate_explosion proc near
 activate_explosion endp
 
 draw_explosion proc near
-    ; Dibuja una pequena cruz luminosa centrada en el asteroide.
     cmp explosion_active,1
     jne dex_done
     push ax
@@ -1237,7 +980,6 @@ dex_done:
 draw_explosion endp
 
 draw_energy_pack proc near
-    ; Dibuja el objeto de recarga solo si esta activo.
     cmp energy_active,1
     jne dep_done
     push bx
@@ -1255,7 +997,6 @@ dep_done:
 draw_energy_pack endp
 
 draw_bullets proc near
-    ; Cada bala se dibuja como una traza vertical de 2 pixeles.
     push ax
     push bx
     push cx
@@ -1289,18 +1030,7 @@ db_next:
 draw_bullets endp
 
 draw_sprite_20 proc near
-    ; -----------------------------------------------------
-    ; draw_sprite_20
-    ; Dibuja un sprite de 20x20 leyendo bytes secuenciales.
-    ;
-    ; Entradas:
-    ;   BX = X inicial
-    ;   DX = Y inicial
-    ;   SI = puntero al sprite
-    ;
-    ; Convencion:
-    ;   color 0 = transparente, no se escribe pixel.
-    ; -----------------------------------------------------
+    ; BX=x, DX=y, SI=sprite 20x20
     push ax
     push bx
     push cx
@@ -1335,8 +1065,7 @@ ds20_skip:
 draw_sprite_20 endp
 
 draw_sprite_10 proc near
-    ; Variante reutilizable para sprites de 10x10.
-    ; Entradas: BX = X, DX = Y, SI = sprite.
+    ; BX=x, DX=y, SI=sprite 10x10
     push ax
     push bx
     push cx
@@ -1369,20 +1098,7 @@ ds10_skip:
 draw_sprite_10 endp
 
 put_pixel proc near
-    ; -----------------------------------------------------
-    ; put_pixel
-    ; Escribe un pixel directamente en memoria VGA.
-    ;
-    ; Entradas:
-    ;   BX = X
-    ;   DX = Y
-    ;   AL = color
-    ;
-    ; Mapeo lineal en modo 13h:
-    ;   offset = y * 320 + x
-    ;          = y * 256 + y * 64 + x
-    ;   El calculo usa SHL para evitar multiplicaciones.
-    ; -----------------------------------------------------
+    ; BX=x, DX=y, AL=color
     push ax
     push bx
     push cx
@@ -1415,12 +1131,7 @@ pp_done:
     ret
 put_pixel endp
 
-; =========================================================
-; HUD Y TEXTO
-; =========================================================
-
 draw_hud proc near
-    ; Agrupa la capa de interfaz superior e inferior.
     call draw_lives
     call draw_score
     call draw_fuel
@@ -1428,8 +1139,6 @@ draw_hud proc near
 draw_hud endp
 
 draw_lives proc near
-    ; Visualiza el indicador UMG usando el texto "UMG":
-    ; cada letra verde representa una vida restante.
     push ax
     push bx
     push cx
@@ -1465,7 +1174,6 @@ dl_print:
 draw_lives endp
 
 draw_score proc near
-    ; Imprime etiqueta y puntuacion decimal.
     mov dh,23
     mov dl,26
     call set_cursor
@@ -1478,8 +1186,6 @@ draw_score proc near
 draw_score endp
 
 draw_fuel proc near
-    ; Dibuja etiqueta y barra horizontal de energia.
-    ; Longitud visual = fuel * 2 pixeles.
     push ax
     push bx
     push cx
@@ -1492,12 +1198,14 @@ draw_fuel proc near
     mov bl,COLOR_CYAN
     call print_string
 
+    ; Fondo fijo de la barra para que no desaparezca visualmente.
     mov bx,65
     mov dx,4
     mov cx,200
     mov al,COLOR_GRAY
     call draw_hline
 
+    ; Barra de energia: largo = fuel * 2 pixeles.
     mov bx,65
     mov dx,4
     mov ax,fuel
@@ -1514,7 +1222,6 @@ draw_fuel proc near
 draw_fuel endp
 
 draw_game_over proc near
-    ; Overlay textual final.
     mov dh,11
     mov dl,15
     call set_cursor
@@ -1531,8 +1238,7 @@ draw_game_over proc near
 draw_game_over endp
 
 draw_hline proc near
-    ; Dibuja una linea horizontal de CX pixeles reutilizando put_pixel.
-    ; Entradas: BX = X, DX = Y, CX = longitud, AL = color.
+    ; BX=x, DX=y, CX=length, AL=color
     push ax
     push bx
     push cx
@@ -1549,9 +1255,6 @@ dh_done:
 draw_hline endp
 
 set_cursor proc near
-    ; Posiciona el cursor de texto BIOS sobre la pagina 0.
-    ; INT 10h / AH=02h:
-    ;   DH = fila, DL = columna, BH = pagina
     push ax
     push bx
     mov ah,02h
@@ -1563,8 +1266,7 @@ set_cursor proc near
 set_cursor endp
 
 print_string proc near
-    ; Imprime una cadena ASCIIZ colorizada.
-    ; Entrada: SI -> cadena terminada en 0, BL = atributo/color.
+    ; SI -> cadena 0, BL=color
     push ax
 ps_loop:
     lodsb
@@ -1578,16 +1280,8 @@ ps_done:
 print_string endp
 
 print_char_color proc near
-    ; -----------------------------------------------------
-    ; print_char_color
-    ; Escribe un caracter en la posicion actual sin provocar
-    ; scroll BIOS, evitando artefactos visuales en modo 13h.
-    ;
-    ; INT 10h:
-    ;   AH=03h -> lee cursor actual
-    ;   AH=09h -> escribe caracter/atributo
-    ;   AH=02h -> fija nueva posicion del cursor
-    ; -----------------------------------------------------
+    ; Imprime AL en la posicion actual sin usar scroll de BIOS.
+    ; Esto reduce los flashazos raros en modo grafico 13h.
     push ax
     push bx
     push cx
@@ -1622,8 +1316,6 @@ pcc_set:
 print_char_color endp
 
 print_number proc near
-    ; Convierte AX a decimal usando divisiones sucesivas entre 10.
-    ; Los residuos se apilan y luego se imprimen en orden correcto.
     push ax
     push bx
     push cx
@@ -1660,25 +1352,8 @@ pn_done:
     ret
 print_number endp
 
-; =========================================================
-; AUDIO - PC SPEAKER
-; =========================================================
-
 tone proc near
-    ; -----------------------------------------------------
-    ; tone
-    ; Genera un tono corto usando el temporizador programable
-    ; 8253/8254 y el altavoz del PC.
-    ;
-    ; Entradas:
-    ;   AX = divisor de frecuencia
-    ;   CX = duracion del retardo ocupado
-    ;
-    ; Puertos usados:
-    ;   43h -> control del PIT
-    ;   42h -> canal 2 del PIT
-    ;   61h -> gate/speaker enable
-    ; -----------------------------------------------------
+    ; AX = divisor de frecuencia, CX = duracion corta
     push ax
     push bx
     push cx
@@ -1712,7 +1387,6 @@ tone_delay:
 tone endp
 
 sound_shot proc near
-    ; Efecto de disparo corto y agudo.
     push ax
     push cx
     mov ax,0450h
@@ -1724,7 +1398,6 @@ sound_shot proc near
 sound_shot endp
 
 sound_explosion proc near
-    ; Doble tono descendente para impacto.
     push ax
     push cx
     mov ax,0900h
@@ -1739,7 +1412,6 @@ sound_explosion proc near
 sound_explosion endp
 
 sound_fuel proc near
-    ; Tonos ascendentes que refuerzan el pickup de energia.
     push ax
     push cx
     mov ax,0350h
@@ -1754,7 +1426,6 @@ sound_fuel proc near
 sound_fuel endp
 
 sound_life proc near
-    ; Tono de penalizacion / perdida de vida.
     push ax
     push cx
     mov ax,0D00h
@@ -1764,5 +1435,6 @@ sound_life proc near
     pop ax
     ret
 sound_life endp
+
 
 end start
